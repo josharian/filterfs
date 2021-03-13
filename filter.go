@@ -19,7 +19,7 @@ func ExcludePaths(fsys fs.FS, hide ...string) fs.FS {
 		}
 		hidden[path] = true
 	}
-	return &excludePathsFS{fsys: fsys, hidden: hidden}
+	return ExcludeFn(fsys, func(s string) bool { return hidden[s] })
 }
 
 // pathPrefixes returns all prefixes of path that represent files (or dirs).
@@ -39,15 +39,25 @@ func pathPrefixes(path string) []string {
 	}
 }
 
-type excludePathsFS struct {
-	fsys   fs.FS
-	hidden map[string]bool
+// ExcludeFn returns a filesystem identical to fsys excluding paths for which hide(path) returns true.
+// Hiding a directory hides all contained subdirectories and files.
+// ExcludeFn panics if hide(".") returns true.
+func ExcludeFn(fsys fs.FS, hide func(string) bool) fs.FS {
+	if hide(".") {
+		panic(`ExcludeFn: cannot hide path "."`)
+	}
+	return &excludeFnFS{fsys: fsys, hide: hide}
 }
 
-func (f *excludePathsFS) Open(name string) (fs.File, error) {
+type excludeFnFS struct {
+	fsys fs.FS
+	hide func(string) bool
+}
+
+func (f *excludeFnFS) Open(name string) (fs.File, error) {
 	pfxs := pathPrefixes(name)
 	for _, pfx := range pfxs {
-		if f.hidden[pfx] {
+		if f.hide(pfx) {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 		}
 	}
@@ -61,19 +71,19 @@ func (f *excludePathsFS) Open(name string) (fs.File, error) {
 	}
 	if fi.IsDir() {
 		if rdf, ok := file.(fs.ReadDirFile); ok {
-			return &excludePathsDir{path: name, excludePathsFS: f, ReadDirFile: rdf}, nil
+			return &excludeFnDir{path: name, excludeFnFS: f, ReadDirFile: rdf}, nil
 		}
 	}
 	return file, nil
 }
 
-type excludePathsDir struct {
+type excludeFnDir struct {
 	path string
-	*excludePathsFS
+	*excludeFnFS
 	fs.ReadDirFile
 }
 
-func (f *excludePathsDir) ReadDir(n int) ([]fs.DirEntry, error) {
+func (f *excludeFnDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	des, err := f.ReadDirFile.ReadDir(n)
 	if err != nil {
 		return nil, err
@@ -81,8 +91,8 @@ func (f *excludePathsDir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 	var dst int
 	for _, de := range des {
-		path := filepath.Join(f.path, de.Name())
-		if f.hidden[path] {
+		path := filepath.Clean(f.path + "/" + de.Name())
+		if f.hide(path) {
 			continue
 		}
 		des[dst] = de
@@ -102,7 +112,7 @@ func (f *excludePathsDir) ReadDir(n int) ([]fs.DirEntry, error) {
 // These require extra care to ensure that hiding a directory
 // also hides all contained subdirectories and files.
 
-// func (f *excludePathsFS) Glob(pattern string) ([]string, error)
-// func (f *excludePathsFS) ReadFile(name string) ([]byte, error)
-// func (f *excludePathsFS) Stat(name string) (fs.FileInfo, error)
-// func (f *excludePathsFS) Sub(dir string) (fs.FS, error)
+// func (f *excludeFnFS) Glob(pattern string) ([]string, error)
+// func (f *excludeFnFS) ReadFile(name string) ([]byte, error)
+// func (f *excludeFnFS) Stat(name string) (fs.FileInfo, error)
+// func (f *excludeFnFS) Sub(dir string) (fs.FS, error)
